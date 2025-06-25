@@ -1,0 +1,258 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Wiki-style comment site with S3 static hosting, API Gateway (HTTP), Lambda, and DynamoDB
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-e7c2339a
+  Subnet1:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-a54ba294
+  Subnet2:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-20d8ad6d
+
+Resources:
+
+  WikiS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: wiki.gbclabs.com
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  WikiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WikiS3Bucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${WikiS3Bucket.Arn}/*'
+
+  CommentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: WikiComments
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaBasicAndVPCAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                Resource: !GetAtt CommentsTable.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access for Lambda inside VPC
+      VpcId: !Ref VpcId
+
+  CommentsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: WikiCommentsHandler
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+          import uuid
+          import datetime
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table('WikiComments')
+
+          def lambda_handler(event, context):
+              try:
+                  body = event.get('body', '{}')
+                  if isinstance(body, str):
+                      data = json.loads(body)
+                  else:
+                      data = body
+
+                  username = data.get('username', 'Anonymous')
+                  comment = data.get('comment', '').strip()
+
+                  if not comment:
+                      return {
+                          'statusCode': 400,
+                          'headers': {'Access-Control-Allow-Origin': '*'},
+                          'body': json.dumps({'error': 'Comment cannot be empty'})
+                      }
+
+                  item = {
+                      'id': str(uuid.uuid4()),
+                      'username': username,
+                      'comment': comment,
+                      'timestamp': datetime.datetime.utcnow().isoformat()
+                  }
+                  table.put_item(Item=item)
+
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'message': 'Comment added'})
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+      VpcConfig:
+        SecurityGroupIds: [!Ref LambdaSecurityGroup]
+        SubnetIds: [!Ref Subnet1, !Ref Subnet2]
+
+  GetCommentsLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetWikiComments
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table('WikiComments')
+
+          def lambda_handler(event, context):
+              try:
+                  response = table.scan()
+                  items = response.get('Items', [])
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps(items)
+                  }
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+      VpcConfig:
+        SecurityGroupIds: [!Ref LambdaSecurityGroup]
+        SubnetIds: [!Ref Subnet1, !Ref Subnet2]
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: WikiHTTPAPI
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowMethods: [POST, GET, OPTIONS]
+        AllowOrigins: ["*"]
+        AllowHeaders: ["Content-Type"]
+
+  LambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CommentsLambda.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  GetCommentsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${GetCommentsLambda.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  CommentRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /comment"
+      Target: !Sub integrations/${LambdaIntegration}
+
+  GetCommentsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /comments"
+      Target: !Sub integrations/${GetCommentsIntegration}
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: prod
+      AutoDeploy: true
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CommentsLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*
+
+  GetCommentsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetCommentsLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*
+
+Outputs:
+  WebsiteBucket:
+    Description: S3 Bucket for the Wiki site
+    Value: !Ref WikiS3Bucket
+
+  PostApiEndpoint:
+    Description: POST comment API endpoint
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/comment
+
+  GetApiEndpoint:
+    Description: GET all comments API endpoint
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/comments

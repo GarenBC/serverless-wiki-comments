@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>My Wiki Page</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>My Wiki Page</h1>
+    <p>A collaborative knowledge space</p>
+  </header>
+
+  <main>
+    <article>
+      <h2>Welcome to the Wiki</h2>
+      <p>This is a sample wiki-style article. You can edit this HTML to add more content.</p>
+    </article>
+
+    <section id="comments">
+      <h3>Comments</h3>
+      <form id="commentForm">
+        <input type="text" id="author" placeholder="Your name" required />
+        <textarea id="text" placeholder="Your comment" required></textarea>
+        <button type="submit">Submit</button>
+      </form>
+      <ul id="commentList"></ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>Powered by AWS Lambda + DynamoDB</p>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
